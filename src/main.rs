@@ -14,8 +14,15 @@ use rp2040_hal as hal;
 use hal::pac;
 
 // Some traits we need
-use embedded_hal::digital::OutputPin;
+use core::fmt::Write;
+use hal::fugit::RateExtU32;
 use hal::Clock;
+
+// UART related types
+use hal::uart::{DataBits, StopBits, UartConfig};
+
+// DHT22 sensor related types
+use dht_sensor::{dht22, DhtReading};
 
 /// The linker will place this boot block at the start of our program image. We
 /// need this to help the ROM bootloader get our code up and running.
@@ -61,17 +68,40 @@ fn main() -> ! {
         &mut pac.RESETS,
     );
 
-    let _dht_pin = pins.gpio2.into_pull_up_input();
+    // UART Periph & pins Configuration
+    let uart_pins = (
+        // UART TX (characters sent from RP2040) on pin 1 (GPIO0)
+        pins.gpio0.into_function(),
+        // UART RX (characters received by RP2040) on pin 2 (GPIO1)
+        pins.gpio1.into_function(),
+    );
+    let mut uart = hal::uart::UartPeripheral::new(pac.UART0, uart_pins, &mut pac.RESETS)
+        .enable(
+            UartConfig::new(9600.Hz(), DataBits::Eight, None, StopBits::One),
+            clocks.peripheral_clock.freq(),
+        )
+        .unwrap();
 
-    let mut led_pin = pins.gpio25.into_push_pull_output();
+    uart.write_full_blocking(b"Coucou Hibou\n");
+
+    // Use GPIO 2 as an InOutPin
+    // NOTE: set_high() impl is not working well on my hardware and do not tie up the GP2 !
+    // I had to append an external  10k pull up resistor to make it work
+    let mut pin = hal::gpio::InOutPin::new(pins.gpio2);
 
     // The DHT datasheet suggests 2 seconds
     delay.delay_ms(2000_u32);
 
     loop {
-        led_pin.set_low().unwrap();
-        delay.delay_ms(1000_u32);
-        led_pin.set_high().unwrap();
+        // Read both temperature and humidity
+        let _ = match dht22::Reading::read(&mut delay, &mut pin) {
+            Ok(dht22::Reading {
+                temperature: t,
+                relative_humidity: h,
+            }) => writeln!(uart, "Temp is: {}, Humidity is:{}", t, h),
+            Err(e) => writeln!(uart, "Raise DHTError {:?}", e),
+        };
+
         delay.delay_ms(1000_u32);
     }
 }
