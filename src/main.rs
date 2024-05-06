@@ -1,4 +1,4 @@
-//! Test the DHT22 sensor
+//! Test the DHT22 sensor + PT100 over RTD sensor
 #![no_std]
 #![no_main]
 
@@ -15,6 +15,7 @@ use hal::pac;
 
 // Some traits we need
 use core::fmt::Write;
+use embedded_hal::digital::OutputPin;
 use hal::fugit::RateExtU32;
 use hal::Clock;
 
@@ -23,6 +24,8 @@ use hal::uart::{DataBits, StopBits, UartConfig};
 
 // DHT22 sensor related types
 use dht_sensor::{dht22, DhtReading};
+// PT100 RTD chip
+use max31865::{FilterMode, Max31865, SensorType};
 
 /// The linker will place this boot block at the start of our program image. We
 /// need this to help the ROM bootloader get our code up and running.
@@ -84,6 +87,38 @@ fn main() -> ! {
 
     uart.write_full_blocking(b"Coucou Hibou\n");
 
+    // These are implicitly used by the spi driver
+    let drdy = pins.gpio8.into_pull_up_input();
+    let mut spi_csn = pins.gpio5.into_push_pull_output();
+    let spi_mosi = pins.gpio7.into_function::<hal::gpio::FunctionSpi>();
+    let spi_miso = pins.gpio4.into_function::<hal::gpio::FunctionSpi>();
+    let spi_sclk = pins.gpio6.into_function::<hal::gpio::FunctionSpi>();
+    let spi = hal::spi::Spi::<_, _, _, 8>::new(pac.SPI0, (spi_mosi, spi_miso, spi_sclk));
+    spi_csn.set_high().unwrap();
+
+    // Exchange the uninitialised SPI driver for an initialised one
+    let spi = spi.init(
+        &mut pac.RESETS,
+        clocks.peripheral_clock.freq(),
+        1.MHz(),
+        embedded_hal::spi::MODE_1,
+    );
+
+    // Init MAX31865
+    let mut rtd_sensor = Max31865::new(spi, spi_csn, drdy);
+    let ref_sensor = &mut rtd_sensor;
+    let _ = ref_sensor.as_mut().expect("REASON").configure(
+        true,
+        true,
+        false,
+        SensorType::TwoOrFourWire,
+        FilterMode::Filter50Hz,
+    );
+    ref_sensor
+        .as_mut()
+        .expect("REASON")
+        .set_calibration(43200_u32);
+
     // Use GPIO 2 as an InOutPin
     // NOTE: set_high() impl is not working well on my hardware and do not tie up the GP2 !
     // I had to append an external  10k pull up resistor to make it work
@@ -93,6 +128,16 @@ fn main() -> ! {
     delay.delay_ms(2000_u32);
 
     loop {
+        // Read PT100 temperature
+        let data_pt100 = rtd_sensor
+            .as_mut()
+            .expect("REASON")
+            .read_default_conversion();
+        let _ = match data_pt100 {
+            Ok(x) => writeln!(uart, "Temp is :{:.2}", x as f32 / 100.0),
+            Err(e) => writeln!(uart, "Err is:{:?}", e),
+        };
+
         // Read both temperature and humidity
         let _ = match dht22::Reading::read(&mut delay, &mut pin) {
             Ok(dht22::Reading {
