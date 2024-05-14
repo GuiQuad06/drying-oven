@@ -31,6 +31,9 @@ pub static BOOT2: [u8; 256] = rp2040_boot2::BOOT_LOADER_GENERIC_03H;
 /// if your board has a different frequency
 const XTAL_FREQ_HZ: u32 = 12_000_000u32;
 
+// Credentials for WiFi connection
+mod credentials;
+
 /// Entry point to our bare-metal application.
 ///
 /// The `#[rp2040_hal::entry]` macro ensures the Cortex-M start-up code calls this function
@@ -64,6 +67,7 @@ fn main() -> ! {
     );
 
     // UART Periph & pins Configuration
+    // UART0
     let uart_pins = (
         // UART TX (characters sent from RP2040) on pin 1 (GPIO0)
         pins.gpio0.into_function(),
@@ -72,18 +76,31 @@ fn main() -> ! {
     );
     let uart = hal::uart::UartPeripheral::new(pac.UART0, uart_pins, &mut pac.RESETS)
         .enable(
+            UartConfig::new(9600.Hz(), DataBits::Eight, None, StopBits::One),
+            clocks.peripheral_clock.freq(),
+        )
+        .unwrap();
+    // UART1 (ESP8266)
+    let esp8266_pins = (
+        pins.gpio8.into_function(),
+        pins.gpio9.into_function(),
+    );
+    let esp8266 = hal::uart::UartPeripheral::new(pac.UART1, esp8266_pins, &mut pac.RESETS)
+        .enable(
             UartConfig::new(115200.Hz(), DataBits::Eight, None, StopBits::One),
             clocks.peripheral_clock.freq(),
         )
         .unwrap();
 
+    uart.write_full_blocking(b"Coucou Hibou\n");
+
     // Initialize WIFI connection
     // Restart: "AT+RST\r\n"
-    uart.write_full_blocking(b"AT+RST\r\n");
+    esp8266.write_full_blocking(b"AT+RST\r\n");
 
     // SSID config
-    let ssid = b"your_ssid";
-    let password = b"your_password";
+    let ssid = credentials::SSID;
+    let password = credentials::PASSWORD;
     let mut cmd = [0u8; 50]; // Adjust the size as needed
 
     let prefix = b"AT+CWJAP=\"";
@@ -103,20 +120,20 @@ fn main() -> ! {
     copy_into_cmd(password);
     copy_into_cmd(postfix);
 
-    uart.write_full_blocking(&cmd[..index]);
+    esp8266.write_full_blocking(&cmd[..index]);
 
     delay.delay_ms(3000_u32);
     // STA config: "AT+CWMODE=1\r\n"
-    uart.write_full_blocking(b"AT+CWMODE=1\r\n");
+    esp8266.write_full_blocking(b"AT+CWMODE=1\r\n");
     delay.delay_ms(1500_u32);
     // IP address: "AT+CIFSR\r\n"
-    uart.write_full_blocking(b"AT+CIFSR\r\n");
+    esp8266.write_full_blocking(b"AT+CIFSR\r\n");
     delay.delay_ms(1500_u32);
     // Several connections: "AT+CIPMUX=1\r\n"
-    uart.write_full_blocking(b"AT+CIPMUX=1\r\n");
+    esp8266.write_full_blocking(b"AT+CIPMUX=1\r\n");
     delay.delay_ms(1500_u32);
     // Server config: "AT+CIPSERVER=1,80\r\n"
-    uart.write_full_blocking(b"AT+CIPSERVER=1,80\r\n");
+    esp8266.write_full_blocking(b"AT+CIPSERVER=1,80\r\n");
 
     loop {
         cortex_m::asm::wfi();
