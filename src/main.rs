@@ -13,11 +13,54 @@ use rp2040_hal as hal;
 use hal::pac;
 
 // Some traits we need
+use embedded_hal_0_2::serial::{Read, Write};
 use hal::fugit::RateExtU32;
 use hal::Clock;
 
 // UART related types
 use hal::uart::{DataBits, StopBits, UartConfig};
+// ESP8266 related lib
+extern crate ESP8266;
+// Credentials for WiFi connection
+mod credentials;
+
+// We need to implement Read trait for InfallibleReader
+struct InfallibleReader<R: Read<u8>>(R);
+
+impl<R: Read<u8>> Read<u8> for InfallibleReader<R> {
+    type Error = core::convert::Infallible;
+
+    fn read(&mut self) -> nb::Result<u8, Self::Error> {
+        match self.0.read() {
+            Ok(byte) => Ok(byte),
+            Err(nb::Error::Other(_)) => Ok(0),
+            Err(nb::Error::WouldBlock) => Err(nb::Error::WouldBlock),
+        }
+    }
+}
+
+// We need to impplement Write trait for InfallibleWriter
+struct InfallibleWriter<W: Write<u8>>(W);
+
+impl<W: Write<u8>> Write<u8> for InfallibleWriter<W> {
+    type Error = core::convert::Infallible;
+
+    fn write(&mut self, word: u8) -> nb::Result<(), Self::Error> {
+        match self.0.write(word) {
+            Ok(()) => Ok(()),
+            Err(nb::Error::Other(_)) => Ok(()),
+            Err(nb::Error::WouldBlock) => Err(nb::Error::WouldBlock),
+        }
+    }
+
+    fn flush(&mut self) -> nb::Result<(), Self::Error> {
+        match self.0.flush() {
+            Ok(()) => Ok(()),
+            Err(nb::Error::Other(_)) => Ok(()),
+            Err(nb::Error::WouldBlock) => Err(nb::Error::WouldBlock),
+        }
+    }
+}
 
 /// The linker will place this boot block at the start of our program image. We
 /// need this to help the ROM bootloader get our code up and running.
@@ -30,9 +73,6 @@ pub static BOOT2: [u8; 256] = rp2040_boot2::BOOT_LOADER_GENERIC_03H;
 /// External high-speed crystal on the Raspberry Pi Pico board is 12 MHz. Adjust
 /// if your board has a different frequency
 const XTAL_FREQ_HZ: u32 = 12_000_000u32;
-
-// Credentials for WiFi connection
-mod credentials;
 
 /// Entry point to our bare-metal application.
 ///
@@ -57,7 +97,7 @@ fn main() -> ! {
     )
     .unwrap();
 
-    let mut delay = cortex_m::delay::Delay::new(core.SYST, clocks.system_clock.freq().to_Hz());
+    let delay = cortex_m::delay::Delay::new(core.SYST, clocks.system_clock.freq().to_Hz());
 
     let pins = hal::gpio::Pins::new(
         pac.IO_BANK0,
@@ -67,7 +107,7 @@ fn main() -> ! {
     );
 
     // UART Periph & pins Configuration
-    // UART0
+    // UART0 (console)
     let uart_pins = (
         // UART TX (characters sent from RP2040) on pin 1 (GPIO0)
         pins.gpio0.into_function(),
@@ -81,10 +121,7 @@ fn main() -> ! {
         )
         .unwrap();
     // UART1 (ESP8266)
-    let esp8266_pins = (
-        pins.gpio8.into_function(),
-        pins.gpio9.into_function(),
-    );
+    let esp8266_pins = (pins.gpio8.into_function(), pins.gpio9.into_function());
     let esp8266 = hal::uart::UartPeripheral::new(pac.UART1, esp8266_pins, &mut pac.RESETS)
         .enable(
             UartConfig::new(115200.Hz(), DataBits::Eight, None, StopBits::One),
@@ -92,48 +129,19 @@ fn main() -> ! {
         )
         .unwrap();
 
+    // esp8266 UART interface needs to be splitted as ESP8266 external crate
+    // is expecting InfallibleReader for the RX channel and InfallibleWriter for
+    // TX channel.
+    let (rx, tx) = esp8266.split();
+    let rx = InfallibleReader(rx);
+    let tx = InfallibleWriter(tx);
+
     uart.write_full_blocking(b"Coucou Hibou\n");
 
-    // Initialize WIFI connection
-    // Restart: "AT+RST\r\n"
-    esp8266.write_full_blocking(b"AT+RST\r\n");
-
-    // SSID config
-    let ssid = credentials::SSID;
-    let password = credentials::PASSWORD;
-    let mut cmd = [0u8; 50]; // Adjust the size as needed
-
-    let prefix = b"AT+CWJAP=\"";
-    let infix = b"\",\"";
-    let postfix = b"\"\r\n";
-
-    let mut index = 0;
-
-    let mut copy_into_cmd = |src: &[u8]| {
-        cmd[index..index + src.len()].copy_from_slice(src);
-        index += src.len();
-    };
-
-    copy_into_cmd(prefix);
-    copy_into_cmd(ssid);
-    copy_into_cmd(infix);
-    copy_into_cmd(password);
-    copy_into_cmd(postfix);
-
-    esp8266.write_full_blocking(&cmd[..index]);
-
-    delay.delay_ms(3000_u32);
-    // STA config: "AT+CWMODE=1\r\n"
-    esp8266.write_full_blocking(b"AT+CWMODE=1\r\n");
-    delay.delay_ms(1500_u32);
-    // IP address: "AT+CIFSR\r\n"
-    esp8266.write_full_blocking(b"AT+CIFSR\r\n");
-    delay.delay_ms(1500_u32);
-    // Several connections: "AT+CIPMUX=1\r\n"
-    esp8266.write_full_blocking(b"AT+CIPMUX=1\r\n");
-    delay.delay_ms(1500_u32);
-    // Server config: "AT+CIPSERVER=1,80\r\n"
-    esp8266.write_full_blocking(b"AT+CIPSERVER=1,80\r\n");
+    let mut esp = ESP8266::esp8266::new(tx, rx, delay).unwrap();
+    let _ = esp.init();
+    let _ = esp.join_AP(credentials::SSID, credentials::PASSWORD);
+    let _ = esp.tcp_server(80);
 
     loop {
         cortex_m::asm::wfi();

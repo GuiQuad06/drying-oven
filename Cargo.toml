@@ -53,6 +53,7 @@ cortex-m-rt = "0.7"
 cortex-m-rtic = "1.1.4"
 panic-halt = "0.2.0"
 dht-sensor = "0.2.1"
+ESP8266 = { git = "https://github.com/GuiQuad06/esp8266_AT.git" }
 rand = { version = "0.8.5", default-features = false }
 nostd_async = { version = "0.6.1", features = ["cortex_m"] }
 futures = { version = "0.3.30", default-features = false, features = [
